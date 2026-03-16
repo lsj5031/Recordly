@@ -2789,28 +2789,121 @@ export function registerIpcHandlers(
     const outputFileName = `recordly-export-${Date.now()}.mp4`;
     const outputPath = path.join(tempDir, outputFileName);
 
+    // Helper function to check if encoder is available
+    const checkEncoderAvailable = async (ffmpegPath: string, encoder: string): Promise<boolean> => {
+      return new Promise((resolve) => {
+        const checkProcess = spawn(ffmpegPath, ['-hide_banner', '-encoders']);
+        let output = '';
+        checkProcess.stdout.on('data', (data: Buffer) => { output += data.toString(); });
+        checkProcess.stderr.on('data', (data: Buffer) => { output += data.toString(); });
+        checkProcess.on('close', () => {
+          resolve(output.includes(encoder));
+        });
+        checkProcess.on('error', () => resolve(false));
+      });
+    };
+
+    // Helper function to run FFmpeg encoding with fallback
+    const runFFmpegEncode = async (
+      ffmpegPath: string,
+      encoder: string,
+      preset: string,
+      additionalArgs: string[],
+      extraVideoArgs: string[],
+      rawFramePath: string,
+      outputPath: string,
+      width: number,
+      height: number,
+      frameRate: number,
+      bitrate: number
+    ): Promise<{ success: boolean; error?: string }> => {
+      return new Promise(async (resolve) => {
+        const ffmpegArgs = [
+          '-f', 'rawvideo',
+          '-pix_fmt', 'rgba',
+          '-s', `${width}x${height}`,
+          '-r', String(frameRate),
+          '-i', rawFramePath,
+          '-c:v', encoder,
+          '-preset', preset,
+          '-b:v', `${Math.round(bitrate / 1000)}k`,
+          ...additionalArgs,
+          ...extraVideoArgs,
+          '-movflags', '+faststart',
+          '-y',
+          outputPath
+        ];
+
+        console.log('[FFmpegExporter] Running FFmpeg with encoder:', encoder);
+
+        const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs);
+        let stderrOutput = '';
+        ffmpegProcess.stderr.on('data', (data: Buffer) => { stderrOutput += data.toString(); });
+
+        const exitCode = await new Promise<number>((res, rej) => {
+          ffmpegProcess.on('close', res);
+          ffmpegProcess.on('error', rej);
+        }).catch(() => -1);
+
+        if (exitCode === 0) {
+          resolve({ success: true });
+        } else {
+          resolve({ success: false, error: `FFmpeg exited with code ${exitCode}: ${stderrOutput}` });
+        }
+      });
+    };
+
     try {
       const ffmpegPath = getFfmpegBinaryPath();
       const { width, height, frameRate, bitrate, useNVENC, useAMF, useQuickSync } = options;
 
-      // Determine hardware encoder
-      let encoder = 'libx264'; // CPU fallback
-      let preset = 'medium';
-      let additionalArgs: string[] = [];
+      // Build encoder preference list: HEVC first, H.264 fallback
+      interface EncoderConfig {
+        hevc: string;
+        h264: string;
+        preset: { hevc: string; h264: string };
+        additionalArgs: string[];
+        hevcExtraArgs: string[];
+      }
+
+      let encoderConfigs: EncoderConfig[] = [];
 
       if (useNVENC) {
-        encoder = 'h264_nvenc';
-        preset = 'p4'; // NVENC preset (p1=fastest, p7=slowest/best)
-        additionalArgs = ['-rc', 'vbr', '-cq', '23'];
-      } else if (useAMF) {
-        encoder = 'h264_amf';
-        preset = 'balanced';
-        additionalArgs = ['-rc', 'vbr_latency'];
-      } else if (useQuickSync) {
-        encoder = 'h264_qsv';
-        preset = 'medium';
-        additionalArgs = ['-global_quality', '23'];
+        encoderConfigs.push({
+          hevc: 'hevc_nvenc',
+          h264: 'h264_nvenc',
+          preset: { hevc: 'p4', h264: 'p4' },
+          additionalArgs: ['-rc', 'vbr', '-cq', '23'],
+          hevcExtraArgs: ['-tag:v', 'hvc1'], // QuickTime compatibility
+        });
       }
+      if (useAMF) {
+        encoderConfigs.push({
+          hevc: 'hevc_amf',
+          h264: 'h264_amf',
+          preset: { hevc: 'balanced', h264: 'balanced' },
+          additionalArgs: ['-rc', 'vbr_latency'],
+          hevcExtraArgs: ['-tag:v', 'hvc1'],
+        });
+      }
+      if (useQuickSync) {
+        encoderConfigs.push({
+          hevc: 'hevc_qsv',
+          h264: 'h264_qsv',
+          preset: { hevc: 'medium', h264: 'medium' },
+          additionalArgs: ['-global_quality', '23'],
+          hevcExtraArgs: ['-tag:v', 'hvc1'],
+        });
+      }
+
+      // CPU fallback
+      encoderConfigs.push({
+        hevc: 'libx265',
+        h264: 'libx264',
+        preset: { hevc: 'medium', h264: 'medium' },
+        additionalArgs: [],
+        hevcExtraArgs: ['-tag:v', 'hvc1'],
+      });
 
       // Write raw RGBA frames to temp file
       // Each frame is width * height * 4 bytes (RGBA)
@@ -2824,40 +2917,66 @@ export function registerIpcHandlers(
 
       await fs.writeFile(rawFramePath, frameBuffer);
 
-      // Build FFmpeg command
-      const ffmpegArgs = [
-        '-f', 'rawvideo',
-        '-pix_fmt', 'rgba',
-        '-s', `${width}x${height}`,
-        '-r', String(frameRate),
-        '-i', rawFramePath,
-        '-c:v', encoder,
-        '-preset', preset,
-        '-b:v', `${Math.round(bitrate / 1000)}k`,
-        ...additionalArgs,
-        '-movflags', '+faststart',
-        '-y',
-        outputPath
-      ];
+      // Try encoders in order: HEVC preferred, H.264 fallback
+      let lastError: string | undefined;
+      let encodeSuccess = false;
 
-      console.log('[FFmpegExporter] Running FFmpeg with args:', ffmpegArgs.join(' '));
+      for (const config of encoderConfigs) {
+        // First try HEVC encoder
+        const hevcAvailable = await checkEncoderAvailable(ffmpegPath, config.hevc);
+        if (hevcAvailable) {
+          console.log(`[FFmpegExporter] Trying HEVC encoder: ${config.hevc}`);
+          const result = await runFFmpegEncode(
+            ffmpegPath,
+            config.hevc,
+            config.preset.hevc,
+            config.additionalArgs,
+            config.hevcExtraArgs,
+            rawFramePath,
+            outputPath,
+            width,
+            height,
+            frameRate,
+            bitrate
+          );
+          if (result.success) {
+            encodeSuccess = true;
+            console.log(`[FFmpegExporter] Successfully encoded with ${config.hevc}`);
+            break;
+          }
+          console.warn(`[FFmpegExporter] HEVC encoder ${config.hevc} failed, trying H.264 fallback`);
+          lastError = result.error;
+        }
 
-      // Run FFmpeg
-      const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs);
+        // Fallback to H.264
+        const h264Available = await checkEncoderAvailable(ffmpegPath, config.h264);
+        if (h264Available) {
+          console.log(`[FFmpegExporter] Trying H.264 encoder: ${config.h264}`);
+          const result = await runFFmpegEncode(
+            ffmpegPath,
+            config.h264,
+            config.preset.h264,
+            config.additionalArgs,
+            [], // No extra args for H.264
+            rawFramePath,
+            outputPath,
+            width,
+            height,
+            frameRate,
+            bitrate
+          );
+          if (result.success) {
+            encodeSuccess = true;
+            console.log(`[FFmpegExporter] Successfully encoded with ${config.h264}`);
+            break;
+          }
+          lastError = result.error;
+        }
+      }
 
-      let stderrOutput = '';
-      ffmpegProcess.stderr.on('data', (data: Buffer) => {
-        stderrOutput += data.toString();
-      });
-
-      const exitCode = await new Promise<number>((resolve, reject) => {
-        ffmpegProcess.on('close', resolve);
-        ffmpegProcess.on('error', reject);
-      });
-
-      if (exitCode !== 0) {
-        console.error('[FFmpegExporter] FFmpeg failed:', stderrOutput);
-        return { success: false, error: `FFmpeg exited with code ${exitCode}: ${stderrOutput}` };
+      if (!encodeSuccess) {
+        console.error('[FFmpegExporter] All encoders failed');
+        return { success: false, error: lastError || 'All encoders failed' };
       }
 
       // Verify output file exists
