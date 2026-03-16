@@ -2767,5 +2767,133 @@ export function registerIpcHandlers(
       return { success: false, error: String(error) };
     }
   });
+
+  // FFmpeg hardware-accelerated encoding (NVENC/AMF/QuickSync)
+  ipcMain.handle('encode-with-ffmpeg', async (_, options: {
+    frames: Uint8Array[];
+    width: number;
+    height: number;
+    frameRate: number;
+    bitrate: number;
+    useNVENC: boolean;
+    useAMF: boolean;
+    useQuickSync: boolean;
+    videoUrl?: string;
+    hasAudio?: boolean;
+    trimRegions?: unknown[];
+    speedRegions?: unknown[];
+    audioRegions?: unknown[];
+  }) => {
+    const tempDir = app.getPath('temp');
+    const rawFramePath = path.join(tempDir, `recordly-raw-${Date.now()}.raw`);
+    const outputFileName = `recordly-export-${Date.now()}.mp4`;
+    const outputPath = path.join(tempDir, outputFileName);
+
+    try {
+      const ffmpegPath = getFfmpegBinaryPath();
+      const { width, height, frameRate, bitrate, useNVENC, useAMF, useQuickSync } = options;
+
+      // Determine hardware encoder
+      let encoder = 'libx264'; // CPU fallback
+      let preset = 'medium';
+      let additionalArgs: string[] = [];
+
+      if (useNVENC) {
+        encoder = 'h264_nvenc';
+        preset = 'p4'; // NVENC preset (p1=fastest, p7=slowest/best)
+        additionalArgs = ['-rc', 'vbr', '-cq', '23'];
+      } else if (useAMF) {
+        encoder = 'h264_amf';
+        preset = 'balanced';
+        additionalArgs = ['-rc', 'vbr_latency'];
+      } else if (useQuickSync) {
+        encoder = 'h264_qsv';
+        preset = 'medium';
+        additionalArgs = ['-global_quality', '23'];
+      }
+
+      // Write raw RGBA frames to temp file
+      // Each frame is width * height * 4 bytes (RGBA)
+      const frameSize = width * height * 4;
+      const frameBuffer = Buffer.alloc(options.frames.length * frameSize);
+
+      for (let i = 0; i < options.frames.length; i++) {
+        const frame = options.frames[i];
+        frameBuffer.set(frame, i * frameSize);
+      }
+
+      await fs.writeFile(rawFramePath, frameBuffer);
+
+      // Build FFmpeg command
+      const ffmpegArgs = [
+        '-f', 'rawvideo',
+        '-pix_fmt', 'rgba',
+        '-s', `${width}x${height}`,
+        '-r', String(frameRate),
+        '-i', rawFramePath,
+        '-c:v', encoder,
+        '-preset', preset,
+        '-b:v', `${Math.round(bitrate / 1000)}k`,
+        ...additionalArgs,
+        '-movflags', '+faststart',
+        '-y',
+        outputPath
+      ];
+
+      console.log('[FFmpegExporter] Running FFmpeg with args:', ffmpegArgs.join(' '));
+
+      // Run FFmpeg
+      const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs);
+
+      let stderrOutput = '';
+      ffmpegProcess.stderr.on('data', (data: Buffer) => {
+        stderrOutput += data.toString();
+      });
+
+      const exitCode = await new Promise<number>((resolve, reject) => {
+        ffmpegProcess.on('close', resolve);
+        ffmpegProcess.on('error', reject);
+      });
+
+      if (exitCode !== 0) {
+        console.error('[FFmpegExporter] FFmpeg failed:', stderrOutput);
+        return { success: false, error: `FFmpeg exited with code ${exitCode}: ${stderrOutput}` };
+      }
+
+      // Verify output file exists
+      try {
+        await fs.access(outputPath);
+      } catch {
+        return { success: false, error: 'Output file was not created' };
+      }
+
+      console.log('[FFmpegExporter] Successfully encoded to:', outputPath);
+      return { success: true, outputPath };
+    } catch (error) {
+      console.error('[FFmpegExporter] Encoding error:', error);
+      return { success: false, error: String(error) };
+    } finally {
+      // Clean up raw frame file
+      try {
+        await fs.unlink(rawFramePath);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+  });
+
+  ipcMain.handle('read-encoded-file', async (_, outputPath: string) => {
+    try {
+      const data = await fs.readFile(outputPath);
+
+      // Clean up temp file after reading
+      fs.unlink(outputPath).catch(() => {});
+
+      return new Blob([data], { type: 'video/mp4' });
+    } catch (error) {
+      console.error('[FFmpegExporter] Failed to read encoded file:', error);
+      throw error;
+    }
+  });
 }
 

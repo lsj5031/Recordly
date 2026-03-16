@@ -50,7 +50,7 @@ import {
   type AudioRegion,
   type PlaybackSpeed,
 } from "./types";
-import { VideoExporter, GifExporter, type ExportProgress, type ExportQuality, type ExportSettings, type ExportFormat, type GifFrameRate, type GifSizePreset, GIF_SIZE_PRESETS, calculateOutputDimensions } from "@/lib/exporter";
+import { VideoExporter, FFmpegExporter, GifExporter, type ExportProgress, type ExportQuality, type ExportSettings, type ExportFormat, type GifFrameRate, type GifSizePreset, GIF_SIZE_PRESETS, calculateOutputDimensions } from "@/lib/exporter";
 import { type AspectRatio, getAspectRatioValue } from "@/utils/aspectRatioUtils";
 import { getAssetPath } from "@/lib/assetPath";
 import { matchesShortcut } from "@/lib/shortcuts";
@@ -155,7 +155,7 @@ export default function VideoEditor() {
   const { shortcuts, isMac } = useShortcuts();
   const nextAnnotationIdRef = useRef(1);
   const nextAnnotationZIndexRef = useRef(1); // Track z-index for stacking order
-  const exporterRef = useRef<VideoExporter | null>(null);
+  const exporterRef = useRef<VideoExporter | FFmpegExporter | null>(null);
   const autoSuggestedVideoPathRef = useRef<string | null>(null);
   const historyPastRef = useRef<EditorHistorySnapshot[]>([]);
   const historyFutureRef = useRef<EditorHistorySnapshot[]>([]);
@@ -1543,7 +1543,11 @@ export default function VideoEditor() {
           }
         }
 
-        const exporter = new VideoExporter({
+        // Check platform to use hardware-accelerated FFmpeg exporter on Windows
+        const platform = await window.electronAPI.getPlatform();
+        const useFFmpegExporter = platform === 'win32';
+
+        const exporterConfig = {
           videoUrl: videoPath,
           width: exportWidth,
           height: exportHeight,
@@ -1575,7 +1579,13 @@ export default function VideoEditor() {
           onProgress: (progress: ExportProgress) => {
             setExportProgress(progress);
           },
-        });
+        };
+
+        const exporter = useFFmpegExporter
+          ? new FFmpegExporter({ ...exporterConfig, useNVENC: true })
+          : new VideoExporter(exporterConfig);
+
+        console.log('[VideoEditor] Using exporter:', useFFmpegExporter ? 'FFmpegExporter (NVENC)' : 'VideoExporter (WebCodecs)');
 
         exporterRef.current = exporter;
         const result = await exporter.export();

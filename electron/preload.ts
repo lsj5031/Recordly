@@ -185,5 +185,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
   muxWgcRecording: () => ipcRenderer.invoke('mux-wgc-recording'),
   // Cursor visibility control for cursor-free browser capture fallback
   hideOsCursor: () => ipcRenderer.invoke('hide-cursor'),
+
+  // FFmpeg hardware-accelerated encoding
+  encodeWithFFmpeg: (options: {
+    frames: Uint8Array[];
+    width: number;
+    height: number;
+    frameRate: number;
+    bitrate: number;
+    useNVENC: boolean;
+    useAMF: boolean;
+    useQuickSync: boolean;
+    videoUrl?: string;
+    hasAudio?: boolean;
+    trimRegions?: unknown[];
+    speedRegions?: unknown[];
+    audioRegions?: unknown[];
+  }) => ipcRenderer.invoke('encode-with-ffmpeg', options),
+
+  readEncodedFile: (outputPath: string) => ipcRenderer.invoke('read-encoded-file', outputPath),
 })
 
