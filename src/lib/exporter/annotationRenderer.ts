@@ -1,341 +1,324 @@
-import type { AnnotationRegion, ArrowDirection } from '@/components/video-editor/types';
+import { CanvasTextMetrics, Container, Graphics, Sprite, Text, TextStyle, Texture } from "pixi.js";
+import { DropShadowFilter } from "pixi-filters/drop-shadow";
+import type { AnnotationRegion, ArrowDirection } from "@/components/video-editor/types";
+import { loadTextureSource } from "./renderingEnvironment";
 
-// SVG path data for each arrow direction
 const ARROW_PATHS: Record<ArrowDirection, string[]> = {
-  'up': [
-    'M 50 20 L 50 80',
-    'M 50 20 L 35 35',
-    'M 50 20 L 65 35',
-  ],
-  'down': [
-    'M 50 20 L 50 80',
-    'M 50 80 L 35 65',
-    'M 50 80 L 65 65',
-  ],
-  'left': [
-    'M 80 50 L 20 50',
-    'M 20 50 L 35 35',
-    'M 20 50 L 35 65',
-  ],
-  'right': [
-    'M 20 50 L 80 50',
-    'M 80 50 L 65 35',
-    'M 80 50 L 65 65',
-  ],
-  'up-right': [
-    'M 25 75 L 75 25',
-    'M 75 25 L 60 30',
-    'M 75 25 L 70 40',
-  ],
-  'up-left': [
-    'M 75 75 L 25 25',
-    'M 25 25 L 40 30',
-    'M 25 25 L 30 40',
-  ],
-  'down-right': [
-    'M 25 25 L 75 75',
-    'M 75 75 L 70 60',
-    'M 75 75 L 60 70',
-  ],
-  'down-left': [
-    'M 75 25 L 25 75',
-    'M 25 75 L 30 60',
-    'M 25 75 L 40 70',
-  ],
+	up: ["M 50 20 L 50 80", "M 50 20 L 35 35", "M 50 20 L 65 35"],
+	down: ["M 50 20 L 50 80", "M 50 80 L 35 65", "M 50 80 L 65 65"],
+	left: ["M 80 50 L 20 50", "M 20 50 L 35 35", "M 20 50 L 35 65"],
+	right: ["M 20 50 L 80 50", "M 80 50 L 65 35", "M 80 50 L 65 65"],
+	"up-right": ["M 25 75 L 75 25", "M 75 25 L 60 30", "M 75 25 L 70 40"],
+	"up-left": ["M 75 75 L 25 25", "M 25 25 L 40 30", "M 25 25 L 30 40"],
+	"down-right": ["M 25 25 L 75 75", "M 75 75 L 70 60", "M 75 75 L 60 70"],
+	"down-left": ["M 75 25 L 25 75", "M 25 75 L 30 60", "M 25 75 L 40 70"],
 };
 
-function parseSvgPath(pathString: string, scaleX: number, scaleY: number): Array<{ cmd: string; args: number[] }> {
-  const commands: Array<{ cmd: string; args: number[] }> = [];
-  const parts = pathString.trim().split(/\s+/);
-  
-  let i = 0;
-  while (i < parts.length) {
-    const cmd = parts[i];
-    if (cmd === 'M' || cmd === 'L') {
-      const x = parseFloat(parts[i + 1]) * scaleX;
-      const y = parseFloat(parts[i + 2]) * scaleY;
-      commands.push({ cmd, args: [x, y] });
-      i += 3;
-    } else {
-      i++;
-    }
-  }
-  
-  return commands;
+const imageTextureCache = new Map<string, Promise<Texture>>();
+
+function parseSvgPath(pathString: string, scaleX: number, scaleY: number) {
+	const commands: Array<{ cmd: string; args: number[] }> = [];
+	const parts = pathString.trim().split(/\s+/);
+
+	let index = 0;
+	while (index < parts.length) {
+		const cmd = parts[index];
+		if (cmd === "M" || cmd === "L") {
+			const x = Number.parseFloat(parts[index + 1]) * scaleX;
+			const y = Number.parseFloat(parts[index + 2]) * scaleY;
+			commands.push({ cmd, args: [x, y] });
+			index += 3;
+		} else {
+			index += 1;
+		}
+	}
+
+	return commands;
 }
 
-
-function renderArrow(
-  ctx: CanvasRenderingContext2D,
-  direction: ArrowDirection,
-  color: string,
-  strokeWidth: number,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  _scaleFactor: number
+function getAnnotationFrame(
+	annotation: AnnotationRegion,
+	canvasWidth: number,
+	canvasHeight: number,
 ) {
-  const paths = ARROW_PATHS[direction];
-  if (!paths) return;
-
-  ctx.save();
-  ctx.translate(x, y);
-  
-  const padding = 8 * _scaleFactor;
-  const availableWidth = Math.max(0, width - padding * 2);
-  const availableHeight = Math.max(0, height - padding * 2);
-
-  const scale = Math.min(availableWidth / 100, availableHeight / 100);
-  
-  const offsetX = padding + (availableWidth - 100 * scale) / 2;
-  const offsetY = padding + (availableHeight - 100 * scale) / 2;
-  
-  // Apply centering offset
-  ctx.translate(offsetX, offsetY);
-  
-  // Apply shadow filter
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.3)';
-  ctx.shadowBlur = 8 * scale; 
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 4 * scale; 
-  
-  ctx.strokeStyle = color;
-  ctx.lineWidth = strokeWidth * scale;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  
-  // Draw all paths as a single shape to avoid overlapping shadows/strokes
-  ctx.beginPath();
-  
-  for (const pathString of paths) {
-    const commands = parseSvgPath(pathString, scale, scale);
-    
-
-    for (const { cmd, args } of commands) {
-      if (cmd === 'M') {
-        ctx.moveTo(args[0], args[1]);
-      } else if (cmd === 'L') {
-        ctx.lineTo(args[0], args[1]);
-      }
-    }
-  }
-  
-  ctx.stroke();
-  
-  ctx.restore();
+	return {
+		x: (annotation.position.x / 100) * canvasWidth,
+		y: (annotation.position.y / 100) * canvasHeight,
+		width: (annotation.size.width / 100) * canvasWidth,
+		height: (annotation.size.height / 100) * canvasHeight,
+	};
 }
 
-function renderText(
-  ctx: CanvasRenderingContext2D,
-  annotation: AnnotationRegion,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  scaleFactor: number
+async function getImageTexture(content: string): Promise<Texture | null> {
+	if (!content || !content.startsWith("data:image")) {
+		return null;
+	}
+
+	let cachedTexture = imageTextureCache.get(content);
+	if (!cachedTexture) {
+		cachedTexture = loadTextureSource(content).then((source) => Texture.from(source));
+		imageTextureCache.set(content, cachedTexture);
+	}
+
+	try {
+		return await cachedTexture;
+	} catch (error) {
+		console.error("[AnnotationRenderer] Failed to load image annotation:", error);
+		imageTextureCache.delete(content);
+		return null;
+	}
+}
+
+function createTextContainer(
+	annotation: AnnotationRegion,
+	canvasWidth: number,
+	canvasHeight: number,
+	scaleFactor: number,
 ) {
-  const style = annotation.style;
-  
-  ctx.save();
+	const { x, y, width, height } = getAnnotationFrame(annotation, canvasWidth, canvasHeight);
+	const content = annotation.textContent ?? annotation.content ?? "";
+	const container = new Container();
+	container.x = x;
+	container.y = y;
 
-  // Clip text to annotation box bounds (matches editor's overflow: hidden)
-  ctx.beginPath();
-  ctx.rect(x, y, width, height);
-  ctx.clip();
+	if (!content) {
+		return container;
+	}
 
-  const fontWeight = style.fontWeight === 'bold' ? 'bold' : 'normal';
-  const fontStyle = style.fontStyle === 'italic' ? 'italic' : 'normal';
-  const scaledFontSize = style.fontSize * scaleFactor;
-  ctx.font = `${fontStyle} ${fontWeight} ${scaledFontSize}px ${style.fontFamily}`;
-  ctx.textBaseline = 'middle';
-  
-  const containerPadding = 8 * scaleFactor;
-  
-  let textX = x;
-  let textY = y + height / 2;
-  
-  if (style.textAlign === 'center') {
-    textX = x + width / 2;
-    ctx.textAlign = 'center';
-  } else if (style.textAlign === 'right') {
-    textX = x + width - containerPadding;
-    ctx.textAlign = 'right';
-  } else {
-    textX = x + containerPadding;
-    ctx.textAlign = 'left';
-  }
-  
-  const availableWidth = width - containerPadding * 2;
-  const rawLines = annotation.content.split('\n');
-  const lines: string[] = [];
-  for (const rawLine of rawLines) {
-    if (!rawLine) {
-      lines.push('');
-      continue;
-    }
-    const words = rawLine.split(/(\s+)/);
-    let current = '';
-    for (const word of words) {
-      const test = current + word;
-      if (current && ctx.measureText(test).width > availableWidth) {
-        lines.push(current);
-        current = word.trimStart();
-      } else {
-        current = test;
-      }
-    }
-    if (current) lines.push(current);
-  }
-  const lineHeight = scaledFontSize * 1.4;
+	const fontSize = annotation.style.fontSize * scaleFactor;
+	const containerPadding = 8 * scaleFactor;
+	const availableWidth = Math.max(1, width - containerPadding * 2);
+	const lineHeight = fontSize * 1.4;
 
-  const startY = textY - ((lines.length - 1) * lineHeight) / 2;
-  
-  lines.forEach((line, index) => {
-    const currentY = startY + index * lineHeight;
-    
-    if (style.backgroundColor && style.backgroundColor !== 'transparent') {
-      const metrics = ctx.measureText(line);
-      const verticalPadding = scaledFontSize * 0.1;
-      const horizontalPadding = scaledFontSize * 0.2;
-      const borderRadius = 4 * scaleFactor;
-      
-      let bgX = textX - horizontalPadding;
-      const bgWidth = metrics.width + horizontalPadding * 2;
-      
-      const contentHeight = scaledFontSize * 1.4;
-      const bgHeight = contentHeight + verticalPadding * 2;
-      const bgY = currentY - bgHeight / 2;
-      
-      if (style.textAlign === 'center') {
-        bgX = textX - bgWidth / 2;
-      } else if (style.textAlign === 'right') {
-        bgX = textX - bgWidth;
-      }
-      
-      ctx.fillStyle = style.backgroundColor;
-      ctx.beginPath();
-      ctx.roundRect(bgX, bgY, bgWidth, bgHeight, borderRadius);
-      ctx.fill();
-    }
-    
-    ctx.fillStyle = style.color;
-    ctx.fillText(line, textX, currentY);
-    
-    if (style.textDecoration === 'underline') {
-      const metrics = ctx.measureText(line);
-      let underlineX = textX;
-      const underlineY = currentY + scaledFontSize * 0.15;
-      
-      if (style.textAlign === 'center') {
-        underlineX = textX - metrics.width / 2;
-      } else if (style.textAlign === 'right') {
-        underlineX = textX - metrics.width;
-      }
-      
-      ctx.strokeStyle = style.color;
-      ctx.lineWidth = Math.max(1, scaledFontSize / 16);
-      ctx.beginPath();
-      ctx.moveTo(underlineX, underlineY);
-      ctx.lineTo(underlineX + metrics.width, underlineY);
-      ctx.stroke();
-    }
-  });
-  
-  ctx.restore();
+	const textStyle = new TextStyle({
+		align: annotation.style.textAlign,
+		breakWords: true,
+		fill: annotation.style.color,
+		fontFamily: annotation.style.fontFamily,
+		fontSize,
+		fontStyle: annotation.style.fontStyle,
+		fontWeight: annotation.style.fontWeight,
+		lineHeight,
+		whiteSpace: "pre-line",
+		wordWrap: true,
+		wordWrapWidth: availableWidth,
+	});
+
+	const metrics = CanvasTextMetrics.measureText(content, textStyle, undefined, true);
+	const textBlockHeight = metrics.lines.length * lineHeight;
+	const textTop = Math.max(0, (height - textBlockHeight) / 2);
+	const lineCenterOffset = lineHeight / 2;
+
+	if (annotation.style.backgroundColor && annotation.style.backgroundColor !== "transparent") {
+		const background = new Graphics();
+		const verticalPadding = fontSize * 0.1;
+		const horizontalPadding = fontSize * 0.2;
+		const borderRadius = 4 * scaleFactor;
+
+		for (const [index, line] of metrics.lines.entries()) {
+			const lineWidth = metrics.lineWidths[index] ?? metrics.width;
+			const lineStartX =
+				annotation.style.textAlign === "center"
+					? containerPadding + (availableWidth - lineWidth) / 2
+					: annotation.style.textAlign === "right"
+						? width - containerPadding - lineWidth
+						: containerPadding;
+			const lineCenterY = textTop + lineCenterOffset + index * lineHeight;
+			const backgroundHeight = lineHeight + verticalPadding * 2;
+			background
+				.roundRect(
+					lineStartX - horizontalPadding,
+					lineCenterY - backgroundHeight / 2,
+					lineWidth + horizontalPadding * 2,
+					backgroundHeight,
+					borderRadius,
+				)
+				.fill({ color: annotation.style.backgroundColor });
+
+			if (!line) {
+				continue;
+			}
+		}
+
+		container.addChild(background);
+	}
+
+	const text = new Text({
+		text: content,
+		style: textStyle,
+	});
+	text.x = containerPadding;
+	text.y = textTop;
+	container.addChild(text);
+
+	if (annotation.style.textDecoration === "underline") {
+		const underline = new Graphics();
+		const underlineWidth = Math.max(1, fontSize / 16);
+
+		for (const [index, line] of metrics.lines.entries()) {
+			if (!line) {
+				continue;
+			}
+
+			const lineWidth = metrics.lineWidths[index] ?? metrics.width;
+			const lineStartX =
+				annotation.style.textAlign === "center"
+					? containerPadding + (availableWidth - lineWidth) / 2
+					: annotation.style.textAlign === "right"
+						? width - containerPadding - lineWidth
+						: containerPadding;
+			const lineCenterY = textTop + lineCenterOffset + index * lineHeight;
+			const underlineY = lineCenterY + fontSize * 0.15;
+
+			underline
+				.moveTo(lineStartX, underlineY)
+				.lineTo(lineStartX + lineWidth, underlineY)
+				.stroke({
+					color: annotation.style.color,
+					width: underlineWidth,
+				});
+		}
+
+		container.addChild(underline);
+	}
+
+	return container;
 }
 
-async function renderImage(
-  ctx: CanvasRenderingContext2D,
-  annotation: AnnotationRegion,
-  x: number,
-  y: number,
-  width: number,
-  height: number
-): Promise<void> {
-  if (!annotation.content || !annotation.content.startsWith('data:image')) {
-    return;
-  }
-  
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      // Preserve aspect ratio - contain the image within the bounds
-      const imgAspect = img.width / img.height;
-      const boxAspect = width / height;
-      
-      let drawWidth = width;
-      let drawHeight = height;
-      let drawX = x;
-      let drawY = y;
-      
-      if (imgAspect > boxAspect) {
+async function createImageContainer(
+	annotation: AnnotationRegion,
+	canvasWidth: number,
+	canvasHeight: number,
+) {
+	const { x, y, width, height } = getAnnotationFrame(annotation, canvasWidth, canvasHeight);
+	const container = new Container();
+	container.x = x;
+	container.y = y;
 
-        drawHeight = width / imgAspect;
-        drawY = y + (height - drawHeight) / 2;
-      } else {
-        drawWidth = height * imgAspect;
-        drawX = x + (width - drawWidth) / 2;
-      }
-      
-      ctx.drawImage(img, drawX, drawY, drawWidth, drawHeight);
-      resolve();
-    };
-    img.onerror = () => {
-      console.error('[AnnotationRenderer] Failed to load image annotation');
-      resolve();
-    };
-    img.src = annotation.content;
-  });
+	const texture = await getImageTexture(annotation.imageContent ?? annotation.content ?? "");
+	if (!texture) {
+		return container;
+	}
+
+	const sprite = new Sprite(texture);
+	const textureWidth = texture.width || 1;
+	const textureHeight = texture.height || 1;
+	const imageAspect = textureWidth / textureHeight;
+	const boxAspect = width / Math.max(1, height);
+
+	let drawWidth = width;
+	let drawHeight = height;
+	let drawX = 0;
+	let drawY = 0;
+
+	if (imageAspect > boxAspect) {
+		drawHeight = width / imageAspect;
+		drawY = (height - drawHeight) / 2;
+	} else {
+		drawWidth = height * imageAspect;
+		drawX = (width - drawWidth) / 2;
+	}
+
+	sprite.x = drawX;
+	sprite.y = drawY;
+	sprite.width = drawWidth;
+	sprite.height = drawHeight;
+	container.addChild(sprite);
+
+	return container;
 }
 
-export async function renderAnnotations(
-  ctx: CanvasRenderingContext2D,
-  annotations: AnnotationRegion[],
-  canvasWidth: number,
-  canvasHeight: number,
-  currentTimeMs: number,
-  scaleFactor: number = 1.0
-): Promise<void> {
-  // Filter active annotations at current time
-  const activeAnnotations = annotations.filter(
-    (ann) => currentTimeMs >= ann.startMs && currentTimeMs <= ann.endMs
-  );
-  
-  // Sort by z-index (lower first, so higher z-index draws on top)
-  const sortedAnnotations = [...activeAnnotations].sort((a, b) => a.zIndex - b.zIndex);
-  
-  for (const annotation of sortedAnnotations) {
-    const x = (annotation.position.x / 100) * canvasWidth;
-    const y = (annotation.position.y / 100) * canvasHeight;
-    const width = (annotation.size.width / 100) * canvasWidth;
-    const height = (annotation.size.height / 100) * canvasHeight;
-    
-    switch (annotation.type) {
-      case 'text':
-        renderText(ctx, annotation, x, y, width, height, scaleFactor);
-        break;
-        
-      case 'image':
-        await renderImage(ctx, annotation, x, y, width, height);
-        break;
-        
-      case 'figure':
-        if (annotation.figureData) {
-          renderArrow(
-            ctx,
-            annotation.figureData.arrowDirection,
-            annotation.figureData.color,
-            annotation.figureData.strokeWidth,
-            x,
-            y,
-            width,
-            height,
-            scaleFactor
-          );
-        }
-        break;
-    }
-  }
+function createFigureContainer(
+	annotation: AnnotationRegion,
+	canvasWidth: number,
+	canvasHeight: number,
+	scaleFactor: number,
+) {
+	const { x, y, width, height } = getAnnotationFrame(annotation, canvasWidth, canvasHeight);
+	const container = new Container();
+	container.x = x;
+	container.y = y;
+
+	if (!annotation.figureData) {
+		return container;
+	}
+
+	const graphics = new Graphics();
+	const padding = 8 * scaleFactor;
+	const availableWidth = Math.max(0, width - padding * 2);
+	const availableHeight = Math.max(0, height - padding * 2);
+	const scale = Math.min(availableWidth / 100, availableHeight / 100);
+	const offsetX = padding + (availableWidth - 100 * scale) / 2;
+	const offsetY = padding + (availableHeight - 100 * scale) / 2;
+
+	for (const pathString of ARROW_PATHS[annotation.figureData.arrowDirection]) {
+		const commands = parseSvgPath(pathString, scale, scale);
+
+		for (const { cmd, args } of commands) {
+			if (cmd === "M") {
+				graphics.moveTo(offsetX + args[0], offsetY + args[1]);
+			} else if (cmd === "L") {
+				graphics.lineTo(offsetX + args[0], offsetY + args[1]);
+			}
+		}
+	}
+
+	graphics.stroke({
+		cap: "round",
+		color: annotation.figureData.color,
+		join: "round",
+		width: annotation.figureData.strokeWidth * scale,
+	});
+	graphics.filters = [
+		new DropShadowFilter({
+			alpha: 0.3,
+			blur: Math.max(2, 8 * scale),
+			color: 0x000000,
+			offset: { x: 0, y: Math.max(1, 4 * scale) },
+			quality: 3,
+		}),
+	];
+
+	container.addChild(graphics);
+	return container;
 }
 
+export async function buildAnnotationDisplayObjects(
+	annotations: AnnotationRegion[],
+	canvasWidth: number,
+	canvasHeight: number,
+	currentTimeMs: number,
+	scaleFactor = 1,
+) {
+	const activeAnnotations = annotations
+		.filter(
+			(annotation) => currentTimeMs >= annotation.startMs && currentTimeMs <= annotation.endMs,
+		)
+		.sort((left, right) => left.zIndex - right.zIndex);
+
+	const displayObjects: Container[] = [];
+
+	for (const annotation of activeAnnotations) {
+		let displayObject: Container;
+
+		switch (annotation.type) {
+			case "text":
+				displayObject = createTextContainer(annotation, canvasWidth, canvasHeight, scaleFactor);
+				break;
+			case "image":
+				displayObject = await createImageContainer(annotation, canvasWidth, canvasHeight);
+				break;
+			case "figure":
+				displayObject = createFigureContainer(annotation, canvasWidth, canvasHeight, scaleFactor);
+				break;
+			default:
+				displayObject = new Container();
+				break;
+		}
+
+		displayObject.zIndex = annotation.zIndex;
+		displayObjects.push(displayObject);
+	}
+
+	return displayObjects;
+}
