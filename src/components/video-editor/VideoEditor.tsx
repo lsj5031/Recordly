@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
-import { useI18n, useScopedT } from "@/contexts/I18nContext";
+import { useI18n } from "@/contexts/I18nContext";
 import { useShortcuts } from "@/contexts/ShortcutsContext";
 import { SUPPORTED_LOCALES } from "@/i18n/config";
 import type { AppLocale } from "@/i18n/config";
@@ -50,7 +50,7 @@ import {
   type AudioRegion,
   type PlaybackSpeed,
 } from "./types";
-import { VideoExporter, FFmpegExporter, GifExporter, type ExportProgress, type ExportQuality, type ExportSettings, type ExportFormat, type GifFrameRate, type GifSizePreset, GIF_SIZE_PRESETS, calculateOutputDimensions } from "@/lib/exporter";
+import { VideoExporter, FFmpegExporter, GifExporter, type ExportEncodingInfo, type ExportProgress, type ExportQuality, type ExportSettings, type ExportFormat, type GifFrameRate, type GifSizePreset, GIF_SIZE_PRESETS, calculateOutputDimensions } from "@/lib/exporter";
 import { type AspectRatio, getAspectRatioValue } from "@/utils/aspectRatioUtils";
 import { getAssetPath } from "@/lib/assetPath";
 import { matchesShortcut } from "@/lib/shortcuts";
@@ -59,6 +59,30 @@ import { buildLoopedCursorTelemetry, getDisplayedTimelineWindowMs } from "./vide
 import { findDominantRegion } from "./videoPlayback/zoomRegionUtils";
 
 const LOOP_CURSOR_END_WINDOW_MS = 670;
+
+function getExportEncodingLabel(encoding: ExportEncodingInfo | null | undefined) {
+  if (!encoding) {
+    return null;
+  }
+
+  const accelerationLabel = encoding.acceleration === 'nvenc'
+    ? 'NVENC'
+    : encoding.acceleration === 'amf'
+      ? 'AMF'
+      : encoding.acceleration === 'qsv'
+        ? 'Quick Sync'
+        : encoding.acceleration === 'cpu'
+          ? 'CPU'
+          : 'Unknown';
+
+  const codecLabel = encoding.codecFamily === 'hevc'
+    ? 'HEVC'
+    : encoding.codecFamily === 'h264'
+      ? 'H.264'
+      : encoding.encoder;
+
+  return `${accelerationLabel} ${codecLabel}`;
+}
 
 type EditorHistorySnapshot = {
   zoomRegions: ZoomRegion[];
@@ -136,6 +160,7 @@ export default function VideoEditor() {
   const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [showExportDialog, setShowExportDialog] = useState(false);
+  const [exportEncodingInfo, setExportEncodingInfo] = useState<ExportEncodingInfo | null>(null);
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9');
   const [exportQuality, setExportQuality] = useState<ExportQuality>('good');
   const [exportFormat, setExportFormat] = useState<ExportFormat>('mp4');
@@ -1342,8 +1367,10 @@ export default function VideoEditor() {
     }
   }, [isPlaying, currentTime, audioRegions]);
 
-  const showExportSuccessToast = useCallback((filePath: string) => {
-    toast.success(`Exported successfully to ${filePath}`, {
+  const showExportSuccessToast = useCallback((filePath: string, encodingInfo?: ExportEncodingInfo | null) => {
+    const encodingLabel = getExportEncodingLabel(encodingInfo);
+
+    toast.success(encodingLabel ? `Exported with ${encodingLabel} to ${filePath}` : `Exported successfully to ${filePath}`, {
       action: {
         label: 'Show in Folder',
         onClick: async () => {
@@ -1376,6 +1403,7 @@ export default function VideoEditor() {
     setIsExporting(true);
     setExportProgress(null);
     setExportError(null);
+    setExportEncodingInfo(null);
     pendingExportSaveRef.current = null;
     setHasPendingExportSave(false);
 
@@ -1591,6 +1619,7 @@ export default function VideoEditor() {
         const result = await exporter.export();
 
         if (result.success && result.blob) {
+          setExportEncodingInfo(result.encoding ?? null);
           const arrayBuffer = await result.blob.arrayBuffer();
           const timestamp = Date.now();
           const fileName = `export-${timestamp}.mp4`;
@@ -1604,13 +1633,18 @@ export default function VideoEditor() {
             toast.info('Save canceled. You can save again without re-exporting.');
             keepExportDialogOpen = true;
           } else if (saveResult.success && saveResult.path) {
-            showExportSuccessToast(saveResult.path);
+            showExportSuccessToast(saveResult.path, result.encoding);
             setExportedFilePath(saveResult.path);
+            if (result.encoding && !result.encoding.hardwareAccelerated) {
+              const fallbackLabel = getExportEncodingLabel(result.encoding) ?? result.encoding.encoder;
+              toast.info(`Export completed with CPU fallback: ${fallbackLabel}. NVENC was not used.`);
+            }
           } else {
             setExportError(saveResult.message || 'Failed to save video');
             toast.error(saveResult.message || 'Failed to save video');
           }
         } else {
+          setExportEncodingInfo(null);
           setExportError(result.error || 'Export failed');
           toast.error(result.error || 'Export failed');
         }
@@ -1625,6 +1659,7 @@ export default function VideoEditor() {
     } catch (error) {
       console.error('Export error:', error);
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      setExportEncodingInfo(null);
       setExportError(errorMessage);
       toast.error(`Export failed: ${errorMessage}`);
     } finally {
@@ -1675,6 +1710,7 @@ export default function VideoEditor() {
 
     setShowExportDialog(true);
     setExportError(null);
+    setExportEncodingInfo(null);
 
     // Start export immediately
     handleExport(settings);
@@ -1688,12 +1724,14 @@ export default function VideoEditor() {
       setIsExporting(false);
       setExportProgress(null);
       setExportError(null);
+      setExportEncodingInfo(null);
       setExportedFilePath(undefined);
     }
   }, []);
 
   const handleExportDialogClose = useCallback(() => {
     setShowExportDialog(false);
+    setExportEncodingInfo(null);
     setExportedFilePath(undefined);
   }, []);
 
@@ -1716,7 +1754,7 @@ export default function VideoEditor() {
       setHasPendingExportSave(false);
       setExportError(null);
       setExportedFilePath(saveResult.path);
-      showExportSuccessToast(saveResult.path);
+      showExportSuccessToast(saveResult.path, exportEncodingInfo);
       setShowExportDialog(false);
       return;
     }
@@ -1724,7 +1762,7 @@ export default function VideoEditor() {
     const errorMessage = saveResult.message || 'Failed to save video';
     setExportError(errorMessage);
     toast.error(errorMessage);
-  }, [showExportSuccessToast]);
+  }, [exportEncodingInfo, showExportSuccessToast]);
 
   const openRecordingsFolder = useCallback(async () => {
     try {
@@ -1993,6 +2031,7 @@ export default function VideoEditor() {
         canRetrySave={hasPendingExportSave}
         exportFormat={exportFormat}
         exportedFilePath={exportedFilePath}
+        encodingInfo={exportEncodingInfo}
       />
     </div>
   );

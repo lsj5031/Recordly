@@ -2768,9 +2768,9 @@ export function registerIpcHandlers(
     }
   });
 
-  // FFmpeg hardware-accelerated encoding (NVENC/AMF/QuickSync)
-  ipcMain.handle('encode-with-ffmpeg', async (_, options: {
-    frames: Uint8Array[];
+  // FFmpeg hardware-accelerated encoding (NVENC/AMF/QuickSync) — stream RGBA
+  // frames directly into FFmpeg stdin so we do not create multi-GB raw temp files.
+  type FfmpegEncodeOptions = {
     width: number;
     height: number;
     frameRate: number;
@@ -2778,227 +2778,419 @@ export function registerIpcHandlers(
     useNVENC: boolean;
     useAMF: boolean;
     useQuickSync: boolean;
-    videoUrl?: string;
-    hasAudio?: boolean;
-    trimRegions?: unknown[];
-    speedRegions?: unknown[];
-    audioRegions?: unknown[];
-  }) => {
-    const tempDir = app.getPath('temp');
-    const rawFramePath = path.join(tempDir, `recordly-raw-${Date.now()}.raw`);
-    const outputFileName = `recordly-export-${Date.now()}.mp4`;
-    const outputPath = path.join(tempDir, outputFileName);
+  };
 
-    // Helper function to check if encoder is available
-    const checkEncoderAvailable = async (ffmpegPath: string, encoder: string): Promise<boolean> => {
-      return new Promise((resolve) => {
-        const checkProcess = spawn(ffmpegPath, ['-hide_banner', '-encoders']);
-        let output = '';
-        checkProcess.stdout.on('data', (data: Buffer) => { output += data.toString(); });
-        checkProcess.stderr.on('data', (data: Buffer) => { output += data.toString(); });
-        checkProcess.on('close', () => {
-          resolve(output.includes(encoder));
-        });
-        checkProcess.on('error', () => resolve(false));
-      });
-    };
+  type FfmpegEncodingInfo = {
+    encoder: string;
+    codecFamily: 'hevc' | 'h264' | 'unknown';
+    acceleration: 'nvenc' | 'amf' | 'qsv' | 'cpu' | 'unknown';
+    hardwareAccelerated: boolean;
+  };
 
-    // Helper function to run FFmpeg encoding with fallback
-    const runFFmpegEncode = async (
-      ffmpegPath: string,
-      encoder: string,
-      preset: string,
-      additionalArgs: string[],
-      extraVideoArgs: string[],
-      rawFramePath: string,
-      outputPath: string,
-      width: number,
-      height: number,
-      frameRate: number,
-      bitrate: number
-    ): Promise<{ success: boolean; error?: string }> => {
-      return new Promise(async (resolve) => {
-        const ffmpegArgs = [
-          '-f', 'rawvideo',
-          '-pix_fmt', 'rgba',
-          '-s', `${width}x${height}`,
-          '-r', String(frameRate),
-          '-i', rawFramePath,
-          '-c:v', encoder,
-          '-preset', preset,
-          '-b:v', `${Math.round(bitrate / 1000)}k`,
-          ...additionalArgs,
-          ...extraVideoArgs,
-          '-movflags', '+faststart',
-          '-y',
-          outputPath
-        ];
+  type EncoderConfig = {
+    hevc: string;
+    h264: string;
+    preset: { hevc: string; h264: string };
+    additionalArgs: string[];
+    hevcExtraArgs: string[];
+    preferH264?: boolean;
+  };
 
-        console.log('[FFmpegExporter] Running FFmpeg with encoder:', encoder);
+  type FfmpegSession = {
+    ffmpegProcess: ChildProcessWithoutNullStreams;
+    outputPath: string;
+    encoding: FfmpegEncodingInfo;
+    stderrOutput: string;
+    closeCode: number | null;
+    closeSignal: NodeJS.Signals | null;
+    completionPromise: Promise<void>;
+  };
 
-        const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs);
-        let stderrOutput = '';
-        ffmpegProcess.stderr.on('data', (data: Buffer) => { stderrOutput += data.toString(); });
+  const ffmpegSessions = new Map<string, FfmpegSession>();
 
-        const exitCode = await new Promise<number>((res, rej) => {
-          ffmpegProcess.on('close', res);
-          ffmpegProcess.on('error', rej);
-        }).catch(() => -1);
+  const buildEncoderConfigs = (options: FfmpegEncodeOptions): EncoderConfig[] => {
+    const encoderConfigs: EncoderConfig[] = [];
 
-        if (exitCode === 0) {
-          resolve({ success: true });
-        } else {
-          resolve({ success: false, error: `FFmpeg exited with code ${exitCode}: ${stderrOutput}` });
-        }
-      });
-    };
-
-    try {
-      const ffmpegPath = getFfmpegBinaryPath();
-      const { width, height, frameRate, bitrate, useNVENC, useAMF, useQuickSync } = options;
-
-      // Build encoder preference list: HEVC first, H.264 fallback
-      interface EncoderConfig {
-        hevc: string;
-        h264: string;
-        preset: { hevc: string; h264: string };
-        additionalArgs: string[];
-        hevcExtraArgs: string[];
-      }
-
-      let encoderConfigs: EncoderConfig[] = [];
-
-      if (useNVENC) {
-        encoderConfigs.push({
-          hevc: 'hevc_nvenc',
-          h264: 'h264_nvenc',
-          preset: { hevc: 'p4', h264: 'p4' },
-          additionalArgs: ['-rc', 'vbr', '-cq', '23'],
-          hevcExtraArgs: ['-tag:v', 'hvc1'], // QuickTime compatibility
-        });
-      }
-      if (useAMF) {
-        encoderConfigs.push({
-          hevc: 'hevc_amf',
-          h264: 'h264_amf',
-          preset: { hevc: 'balanced', h264: 'balanced' },
-          additionalArgs: ['-rc', 'vbr_latency'],
-          hevcExtraArgs: ['-tag:v', 'hvc1'],
-        });
-      }
-      if (useQuickSync) {
-        encoderConfigs.push({
-          hevc: 'hevc_qsv',
-          h264: 'h264_qsv',
-          preset: { hevc: 'medium', h264: 'medium' },
-          additionalArgs: ['-global_quality', '23'],
-          hevcExtraArgs: ['-tag:v', 'hvc1'],
-        });
-      }
-
-      // CPU fallback
+    if (options.useNVENC) {
       encoderConfigs.push({
-        hevc: 'libx265',
-        h264: 'libx264',
-        preset: { hevc: 'medium', h264: 'medium' },
-        additionalArgs: [],
+        hevc: 'hevc_nvenc',
+        h264: 'h264_nvenc',
+        // Self-use NVIDIA path: bias toward faster presets and H.264 first.
+        preset: { hevc: 'p2', h264: 'p2' },
+        additionalArgs: ['-rc', 'vbr', '-cq', '23'],
+        hevcExtraArgs: ['-tag:v', 'hvc1'],
+        preferH264: true,
+      });
+    }
+    if (options.useAMF) {
+      encoderConfigs.push({
+        hevc: 'hevc_amf',
+        h264: 'h264_amf',
+        preset: { hevc: 'balanced', h264: 'balanced' },
+        additionalArgs: ['-rc', 'vbr_latency'],
         hevcExtraArgs: ['-tag:v', 'hvc1'],
       });
+    }
+    if (options.useQuickSync) {
+      encoderConfigs.push({
+        hevc: 'hevc_qsv',
+        h264: 'h264_qsv',
+        preset: { hevc: 'medium', h264: 'medium' },
+        additionalArgs: ['-global_quality', '23'],
+        hevcExtraArgs: ['-tag:v', 'hvc1'],
+      });
+    }
 
-      // Write raw RGBA frames to temp file
-      // Each frame is width * height * 4 bytes (RGBA)
-      const frameSize = width * height * 4;
-      const frameBuffer = Buffer.alloc(options.frames.length * frameSize);
+    encoderConfigs.push({
+      hevc: 'libx265',
+      h264: 'libx264',
+      preset: { hevc: 'medium', h264: 'medium' },
+      additionalArgs: [],
+      hevcExtraArgs: ['-tag:v', 'hvc1'],
+    });
 
-      for (let i = 0; i < options.frames.length; i++) {
-        const frame = options.frames[i];
-        frameBuffer.set(frame, i * frameSize);
-      }
+    return encoderConfigs;
+  };
 
-      await fs.writeFile(rawFramePath, frameBuffer);
+  const describeEncoding = (encoder: string): FfmpegEncodingInfo => {
+    const codecFamily = encoder.startsWith('hevc')
+      ? 'hevc'
+      : encoder.startsWith('h264')
+        ? 'h264'
+        : 'unknown';
 
-      // Try encoders in order: HEVC preferred, H.264 fallback
+    const acceleration = encoder.includes('nvenc')
+      ? 'nvenc'
+      : encoder.includes('amf')
+        ? 'amf'
+        : encoder.includes('qsv')
+          ? 'qsv'
+          : encoder.startsWith('libx')
+            ? 'cpu'
+            : 'unknown';
+
+    return {
+      encoder,
+      codecFamily,
+      acceleration,
+      hardwareAccelerated: acceleration === 'nvenc' || acceleration === 'amf' || acceleration === 'qsv',
+    };
+  };
+
+  const checkEncoderAvailable = async (ffmpegPath: string, encoder: string): Promise<boolean> => {
+    return new Promise((resolve) => {
+      const checkProcess = spawn(ffmpegPath, ['-hide_banner', '-encoders']);
+      let output = '';
+      checkProcess.stdout.on('data', (data: Buffer) => { output += data.toString(); });
+      checkProcess.stderr.on('data', (data: Buffer) => { output += data.toString(); });
+      checkProcess.on('close', () => {
+        resolve(output.includes(encoder));
+      });
+      checkProcess.on('error', () => resolve(false));
+    });
+  };
+
+  const probeEncoderUsability = async (
+    ffmpegPath: string,
+    encoder: string,
+    preset: string,
+    additionalArgs: string[],
+    extraVideoArgs: string[],
+  ): Promise<{ success: boolean; error?: string }> => {
+    return new Promise((resolve) => {
+      const probeArgs = [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-f',
+        'lavfi',
+        '-i',
+        'color=c=black:s=64x64:r=1',
+        '-frames:v',
+        '1',
+        '-an',
+        '-c:v',
+        encoder,
+        '-preset',
+        preset,
+        '-b:v',
+        '1M',
+        ...additionalArgs,
+        ...extraVideoArgs,
+        '-f',
+        'null',
+        '-',
+      ];
+
+      const probeProcess = spawn(ffmpegPath, probeArgs, {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+
+      let stderrOutput = '';
+      probeProcess.stderr.on('data', (data: Buffer) => {
+        stderrOutput += data.toString();
+      });
+      probeProcess.on('close', (code) => {
+        if (code === 0) {
+          resolve({ success: true });
+        } else {
+          resolve({
+            success: false,
+            error: stderrOutput.trim() || `FFmpeg probe exited with code ${code ?? 'unknown'}`,
+          });
+        }
+      });
+      probeProcess.on('error', (error) => {
+        resolve({ success: false, error: String(error) });
+      });
+    });
+  };
+
+  const removeTempOutput = async (outputPath: string) => {
+    try {
+      await fs.rm(outputPath, { force: true });
+    } catch {
+      // Ignore cleanup errors.
+    }
+  };
+
+  ipcMain.handle('ffmpeg-start-encode', async (_, options: FfmpegEncodeOptions) => {
+    try {
+      const ffmpegPath = getFfmpegBinaryPath();
+      const tempDir = app.getPath('temp');
+      const sessionId = `recordly-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const outputPath = path.join(tempDir, `${sessionId}.mp4`);
+      const encoderConfigs = buildEncoderConfigs(options);
       let lastError: string | undefined;
-      let encodeSuccess = false;
 
       for (const config of encoderConfigs) {
-        // First try HEVC encoder
-        const hevcAvailable = await checkEncoderAvailable(ffmpegPath, config.hevc);
-        if (hevcAvailable) {
-          console.log(`[FFmpegExporter] Trying HEVC encoder: ${config.hevc}`);
-          const result = await runFFmpegEncode(
-            ffmpegPath,
-            config.hevc,
-            config.preset.hevc,
-            config.additionalArgs,
-            config.hevcExtraArgs,
-            rawFramePath,
-            outputPath,
-            width,
-            height,
-            frameRate,
-            bitrate
-          );
-          if (result.success) {
-            encodeSuccess = true;
-            console.log(`[FFmpegExporter] Successfully encoded with ${config.hevc}`);
-            break;
-          }
-          console.warn(`[FFmpegExporter] HEVC encoder ${config.hevc} failed, trying H.264 fallback`);
-          lastError = result.error;
-        }
+        const candidates = config.preferH264
+          ? [
+              {
+                encoder: config.h264,
+                preset: config.preset.h264,
+                extraVideoArgs: [] as string[],
+              },
+              {
+                encoder: config.hevc,
+                preset: config.preset.hevc,
+                extraVideoArgs: config.hevcExtraArgs,
+              },
+            ]
+          : [
+              {
+                encoder: config.hevc,
+                preset: config.preset.hevc,
+                extraVideoArgs: config.hevcExtraArgs,
+              },
+              {
+                encoder: config.h264,
+                preset: config.preset.h264,
+                extraVideoArgs: [] as string[],
+              },
+            ];
 
-        // Fallback to H.264
-        const h264Available = await checkEncoderAvailable(ffmpegPath, config.h264);
-        if (h264Available) {
-          console.log(`[FFmpegExporter] Trying H.264 encoder: ${config.h264}`);
-          const result = await runFFmpegEncode(
-            ffmpegPath,
-            config.h264,
-            config.preset.h264,
-            config.additionalArgs,
-            [], // No extra args for H.264
-            rawFramePath,
-            outputPath,
-            width,
-            height,
-            frameRate,
-            bitrate
-          );
-          if (result.success) {
-            encodeSuccess = true;
-            console.log(`[FFmpegExporter] Successfully encoded with ${config.h264}`);
-            break;
+        for (const candidate of candidates) {
+          const available = await checkEncoderAvailable(ffmpegPath, candidate.encoder);
+          if (!available) {
+            continue;
           }
-          lastError = result.error;
+
+          console.log(`[FFmpegExporter] Probing encoder: ${candidate.encoder}`);
+          const probe = await probeEncoderUsability(
+            ffmpegPath,
+            candidate.encoder,
+            candidate.preset,
+            config.additionalArgs,
+            candidate.extraVideoArgs,
+          );
+
+          if (!probe.success) {
+            lastError = probe.error;
+            console.warn(`[FFmpegExporter] Encoder probe failed for ${candidate.encoder}:`, probe.error);
+            continue;
+          }
+
+          const ffmpegArgs = [
+            '-hide_banner',
+            '-loglevel',
+            'error',
+            '-f',
+            'rawvideo',
+            '-pix_fmt',
+            'rgba',
+            '-s',
+            `${options.width}x${options.height}`,
+            '-r',
+            String(options.frameRate),
+            '-i',
+            'pipe:0',
+            '-an',
+            '-c:v',
+            candidate.encoder,
+            '-preset',
+            candidate.preset,
+            '-b:v',
+            `${Math.round(options.bitrate / 1000)}k`,
+            ...config.additionalArgs,
+            ...candidate.extraVideoArgs,
+            '-pix_fmt',
+            'yuv420p',
+            '-movflags',
+            '+faststart',
+            '-y',
+            outputPath,
+          ];
+
+          console.log('[FFmpegExporter] Starting stream encode with encoder:', candidate.encoder);
+          const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs);
+
+          const session: FfmpegSession = {
+            ffmpegProcess,
+            outputPath,
+            encoding: describeEncoding(candidate.encoder),
+            stderrOutput: '',
+            closeCode: null,
+            closeSignal: null,
+            completionPromise: Promise.resolve(),
+          };
+
+          session.completionPromise = new Promise((resolve) => {
+            ffmpegProcess.stderr.on('data', (data: Buffer) => {
+              session.stderrOutput += data.toString();
+            });
+            ffmpegProcess.once('error', (error) => {
+              session.stderrOutput += `${session.stderrOutput ? '\n' : ''}${String(error)}`;
+              session.closeCode = -1;
+              resolve();
+            });
+            ffmpegProcess.once('close', (code, signal) => {
+              session.closeCode = code;
+              session.closeSignal = signal;
+              resolve();
+            });
+          });
+
+          ffmpegSessions.set(sessionId, session);
+          console.log('[FFmpegExporter] Started encode session:', sessionId);
+          return { success: true, sessionId };
         }
       }
 
-      if (!encodeSuccess) {
-        console.error('[FFmpegExporter] All encoders failed');
-        return { success: false, error: lastError || 'All encoders failed' };
+      console.error('[FFmpegExporter] No encoder passed the startup probe');
+      return {
+        success: false,
+        error: lastError || 'No usable FFmpeg encoder was available for streaming export',
+      };
+    } catch (error) {
+      console.error('[FFmpegExporter] Failed to start encode session:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('ffmpeg-write-frame', async (_, sessionId: string, frameData: Uint8Array) => {
+    const session = ffmpegSessions.get(sessionId);
+    if (!session) {
+      return { success: false, error: 'Invalid session ID' };
+    }
+
+    if (
+      session.closeCode !== null
+      || session.closeSignal !== null
+      || session.ffmpegProcess.stdin.destroyed
+      || !session.ffmpegProcess.stdin.writable
+    ) {
+      return {
+        success: false,
+        error: session.stderrOutput.trim() || 'FFmpeg encoder is no longer accepting frames',
+      };
+    }
+
+    return new Promise<{ success: boolean; error?: string }>((resolve) => {
+      session.ffmpegProcess.stdin.write(Buffer.from(frameData), (err) => {
+        if (err) {
+          resolve({ success: false, error: String(err) });
+        } else {
+          resolve({ success: true });
+        }
+      });
+    });
+  });
+
+  ipcMain.handle('ffmpeg-finish-encode', async (_, sessionId: string) => {
+    const session = ffmpegSessions.get(sessionId);
+    if (!session) {
+      return { success: false, error: 'Invalid session ID' };
+    }
+
+    ffmpegSessions.delete(sessionId);
+
+    try {
+      if (!session.ffmpegProcess.stdin.destroyed && !session.ffmpegProcess.stdin.writableEnded) {
+        await new Promise<void>((resolve) => {
+          session.ffmpegProcess.stdin.end(() => resolve());
+        });
       }
 
-      // Verify output file exists
+      await session.completionPromise;
+
+      if (session.closeCode !== 0) {
+        await removeTempOutput(session.outputPath);
+        const exitMessage = session.closeSignal
+          ? `FFmpeg exited due to signal ${session.closeSignal}`
+          : `FFmpeg exited with code ${session.closeCode ?? 'unknown'}`;
+        return {
+          success: false,
+          error: session.stderrOutput.trim() || exitMessage,
+        };
+      }
+
       try {
-        await fs.access(outputPath);
+        await fs.access(session.outputPath);
       } catch {
         return { success: false, error: 'Output file was not created' };
       }
 
-      console.log('[FFmpegExporter] Successfully encoded to:', outputPath);
-      return { success: true, outputPath };
+      console.log('[FFmpegExporter] Successfully encoded to:', session.outputPath);
+      return {
+        success: true,
+        outputPath: session.outputPath,
+        encoding: session.encoding,
+      };
     } catch (error) {
       console.error('[FFmpegExporter] Encoding error:', error);
+      await removeTempOutput(session.outputPath);
       return { success: false, error: String(error) };
-    } finally {
-      // Clean up raw frame file
-      try {
-        await fs.unlink(rawFramePath);
-      } catch {
-        // Ignore cleanup errors
-      }
     }
+  });
+
+  ipcMain.handle('ffmpeg-cancel-encode', async (_, sessionId: string) => {
+    const session = ffmpegSessions.get(sessionId);
+    if (!session) {
+      return { success: true };
+    }
+
+    ffmpegSessions.delete(sessionId);
+
+    try {
+      if (!session.ffmpegProcess.stdin.destroyed) {
+        session.ffmpegProcess.stdin.destroy();
+      }
+    } catch {
+      // Ignore stdin shutdown issues during cancellation.
+    }
+
+    try {
+      if (session.closeCode === null && session.closeSignal === null) {
+        session.ffmpegProcess.kill();
+      }
+    } catch {
+      // Ignore kill failures during cancellation.
+    }
+
+    await session.completionPromise.catch(() => undefined);
+    await removeTempOutput(session.outputPath);
+    return { success: true };
   });
 
   ipcMain.handle('read-encoded-file', async (_, outputPath: string) => {
@@ -3008,11 +3200,11 @@ export function registerIpcHandlers(
       // Clean up temp file after reading
       fs.unlink(outputPath).catch(() => {});
 
-      return new Blob([data], { type: 'video/mp4' });
+      // Return ArrayBuffer — Blob is not serializable over Electron IPC
+      return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
     } catch (error) {
       console.error('[FFmpegExporter] Failed to read encoded file:', error);
       throw error;
     }
   });
 }
-

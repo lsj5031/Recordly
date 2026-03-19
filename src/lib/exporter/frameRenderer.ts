@@ -157,7 +157,11 @@ export class FrameRenderer {
     this.compositeCanvas = document.createElement('canvas');
     this.compositeCanvas.width = this.config.width;
     this.compositeCanvas.height = this.config.height;
-    this.compositeCtx = this.compositeCanvas.getContext('2d', { willReadFrequently: false });
+    // Export reads pixels from this canvas every frame, so optimize for readback.
+    this.compositeCtx = this.compositeCanvas.getContext('2d', {
+      alpha: false,
+      willReadFrequently: true,
+    });
     
     if (!this.compositeCtx) {
       throw new Error('Failed to get 2D context for composite canvas');
@@ -651,6 +655,20 @@ export class FrameRenderer {
     return this.compositeCanvas;
   }
 
+  readCompositeRgbaFrame(): Uint8Array {
+    if (!this.compositeCanvas || !this.compositeCtx) {
+      throw new Error('Renderer not initialized');
+    }
+
+    const imageData = this.compositeCtx.getImageData(
+      0,
+      0,
+      this.compositeCanvas.width,
+      this.compositeCanvas.height,
+    );
+    return new Uint8Array(imageData.data.buffer);
+  }
+
 
   destroy(): void {
     if (this.videoSprite) {
@@ -679,4 +697,3 @@ export class FrameRenderer {
     this.compositeCtx = null;
   }
 }
-

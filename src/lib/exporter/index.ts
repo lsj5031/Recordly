@@ -7,6 +7,7 @@ export { VideoMuxer } from './muxer';
 export { GifExporter, calculateOutputDimensions } from './gifExporter';
 export type {
   ExportConfig,
+  ExportEncodingInfo,
   ExportProgress,
   ExportResult,
   VideoFrameData,
@@ -23,5 +24,4 @@ export {
   VALID_GIF_FRAME_RATES,
   isValidGifFrameRate
 } from './types';
-
 

@@ -11,14 +11,22 @@ export interface ExportProgress {
   totalFrames: number;
   percentage: number;
   estimatedTimeRemaining: number; // in seconds
-  phase?: 'extracting' | 'finalizing'; // Phase of export
+  phase?: 'extracting' | 'rendering' | 'encoding' | 'finalizing'; // Phase of export
   renderProgress?: number; // 0-100, progress of GIF rendering phase
+}
+
+export interface ExportEncodingInfo {
+  encoder: string;
+  codecFamily: 'hevc' | 'h264' | 'unknown';
+  acceleration: 'nvenc' | 'amf' | 'qsv' | 'cpu' | 'webcodecs' | 'unknown';
+  hardwareAccelerated: boolean;
 }
 
 export interface ExportResult {
   success: boolean;
   blob?: Blob;
   error?: string;
+  encoding?: ExportEncodingInfo;
 }
 
 export interface VideoFrameData {
@@ -71,4 +79,3 @@ export const VALID_GIF_FRAME_RATES: readonly GifFrameRate[] = [15, 20, 25, 30] a
 export function isValidGifFrameRate(rate: number): rate is GifFrameRate {
   return VALID_GIF_FRAME_RATES.includes(rate as GifFrameRate);
 }
-

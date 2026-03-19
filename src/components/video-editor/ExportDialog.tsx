@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { X, Download, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import type { ExportProgress } from '@/lib/exporter';
+import type { ExportEncodingInfo, ExportProgress } from '@/lib/exporter';
 import { toast } from 'sonner'; // Add this import
 import { useScopedT } from "../../contexts/I18nContext";
 
@@ -17,6 +17,31 @@ interface ExportDialogProps {
   canRetrySave?: boolean;
   exportFormat?: 'mp4' | 'gif';
   exportedFilePath?: string;
+  encodingInfo?: ExportEncodingInfo | null;
+}
+
+function getEncodingLabel(encodingInfo: ExportEncodingInfo | null | undefined) {
+  if (!encodingInfo) {
+    return null;
+  }
+
+  const accelerationLabel = encodingInfo.acceleration === 'nvenc'
+    ? 'NVENC'
+    : encodingInfo.acceleration === 'amf'
+      ? 'AMF'
+      : encodingInfo.acceleration === 'qsv'
+        ? 'Quick Sync'
+        : encodingInfo.acceleration === 'cpu'
+          ? 'CPU'
+          : 'Unknown';
+
+  const codecLabel = encodingInfo.codecFamily === 'hevc'
+    ? 'HEVC'
+    : encodingInfo.codecFamily === 'h264'
+      ? 'H.264'
+      : encodingInfo.encoder;
+
+  return `${accelerationLabel} ${codecLabel}`;
 }
 
 export function ExportDialog({
@@ -30,6 +55,7 @@ export function ExportDialog({
   canRetrySave = false,
   exportFormat = 'mp4',
   exportedFilePath, // Add this line
+  encodingInfo,
 }: ExportDialogProps) {
   const t = useScopedT('dialogs');
   const [showSuccess, setShowSuccess] = useState(false);
@@ -62,6 +88,7 @@ export function ExportDialog({
   if (!isOpen) return null;
 
   const formatLabel = exportFormat === 'gif' ? 'GIF' : 'Video';
+  const encodingLabel = getEncodingLabel(encodingInfo);
   
   // Determine if we're in the compiling phase (frames done but still exporting)
   const isCompiling = isExporting && progress && progress.percentage >= 100 && exportFormat === 'gif';
@@ -260,6 +287,23 @@ export function ExportDialog({
               </div>
             </div>
 
+            {encodingInfo && (
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-white/5 rounded-xl p-3 border border-white/5">
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Encoder</div>
+                  <div className="text-slate-200 font-medium text-sm">
+                    {encodingLabel}
+                  </div>
+                </div>
+                <div className="bg-white/5 rounded-xl p-3 border border-white/5">
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Acceleration</div>
+                  <div className={`font-medium text-sm ${encodingInfo.hardwareAccelerated ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {encodingInfo.hardwareAccelerated ? 'Hardware' : 'CPU fallback'}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {onCancel && (
               <div className="pt-2">
                 <Button
@@ -285,4 +329,3 @@ export function ExportDialog({
     </>
   );
 }
-

@@ -54,6 +54,15 @@ export class VideoExporter {
     this.config = config;
   }
 
+  private getEffectiveFrameRate(sourceFrameRate?: number): number {
+    if (!Number.isFinite(sourceFrameRate) || !sourceFrameRate || sourceFrameRate <= 0) {
+      return this.config.frameRate;
+    }
+
+    const roundedSourceFrameRate = Math.max(1, Math.round(sourceFrameRate));
+    return Math.min(this.config.frameRate, roundedSourceFrameRate);
+  }
+
   async export(): Promise<ExportResult> {
     try {
       this.cleanup();
@@ -62,6 +71,7 @@ export class VideoExporter {
       // Initialize streaming decoder and load video metadata
       this.streamingDecoder = new StreamingVideoDecoder();
       const videoInfo = await this.streamingDecoder.loadMetadata(this.config.videoUrl);
+      const effectiveFrameRate = this.getEffectiveFrameRate(videoInfo.frameRate);
 
       // Initialize frame renderer
       this.renderer = new FrameRenderer({
@@ -93,7 +103,7 @@ export class VideoExporter {
       await this.renderer.initialize();
 
       // Initialize video encoder
-      await this.initializeEncoder();
+      await this.initializeEncoder(effectiveFrameRate);
 
       const hasAudioRegions = (this.config.audioRegions ?? []).length > 0;
       const hasAudio = videoInfo.hasAudio || hasAudioRegions;
@@ -104,19 +114,21 @@ export class VideoExporter {
 
       // Calculate effective duration and frame count (excluding trim regions)
       const effectiveDuration = this.streamingDecoder.getEffectiveDuration(this.config.trimRegions, this.config.speedRegions);
-      const totalFrames = Math.ceil(effectiveDuration * this.config.frameRate);
+      const totalFrames = Math.ceil(effectiveDuration * effectiveFrameRate);
 
       console.log('[VideoExporter] Original duration:', videoInfo.duration, 's');
       console.log('[VideoExporter] Effective duration:', effectiveDuration, 's');
+      console.log('[VideoExporter] Source frame rate:', videoInfo.frameRate);
+      console.log('[VideoExporter] Effective export frame rate:', effectiveFrameRate);
       console.log('[VideoExporter] Total frames to export:', totalFrames);
       console.log('[VideoExporter] Using streaming decode (web-demuxer + VideoDecoder)');
 
-      const frameDuration = 1_000_000 / this.config.frameRate; // in microseconds
+      const frameDuration = 1_000_000 / effectiveFrameRate; // in microseconds
       let frameIndex = 0;
 
       // Stream decode and process frames — no seeking!
       await this.streamingDecoder.decodeAll(
-        this.config.frameRate,
+        effectiveFrameRate,
         this.config.trimRegions,
         this.config.speedRegions,
         async (videoFrame, _exportTimestampUs, sourceTimestampMs) => {
@@ -252,18 +264,28 @@ export class VideoExporter {
     }
   }
 
-  private async initializeEncoder(): Promise<void> {
+  private async initializeEncoder(frameRate: number): Promise<void> {
     this.encodeQueue = 0;
     this.pendingMuxing = Promise.resolve();
     this.chunkCount = 0;
     let videoDescription: Uint8Array | undefined;
+
+    // Ordered from most capable to most compatible. avc1.PPCCLL where PP=profile, CC=constraints, LL=level.
+    // High 5.1 → Main 5.1 → Baseline 5.1 → Main 3.1 → Baseline 3.1
+    const CODEC_FALLBACK_LIST = this.config.codec
+      ? [this.config.codec]
+      : ['avc1.640033', 'avc1.4d4033', 'avc1.420033', 'avc1.4d401f', 'avc1.42001f'];
+
+    let resolvedCodec: string | null = null;
 
     this.encoder = new VideoEncoder({
       output: (chunk, meta) => {
         // Capture decoder config metadata from encoder output
         if (meta?.decoderConfig?.description && !videoDescription) {
           const desc = meta.decoderConfig.description;
-          videoDescription = new Uint8Array(desc instanceof ArrayBuffer ? desc : (desc as any));
+          videoDescription = ArrayBuffer.isView(desc)
+            ? new Uint8Array(desc.buffer, desc.byteOffset, desc.byteLength)
+            : new Uint8Array(desc);
           this.videoDescription = videoDescription;
         }
         // Capture colorSpace from encoder metadata if provided
@@ -288,7 +310,7 @@ export class VideoExporter {
 
               const metadata: EncodedVideoChunkMetadata = {
                 decoderConfig: {
-                  codec: this.config.codec || 'avc1.640033',
+                  codec: resolvedCodec ?? (this.config.codec || 'avc1.640033'),
                   codedWidth: this.config.width,
                   codedHeight: this.config.height,
                   description: this.videoDescription,
@@ -307,44 +329,62 @@ export class VideoExporter {
         this.encodeQueue--;
       },
       error: (error) => {
-        console.error('[VideoExporter] Encoder error:', error);
-        // Stop export encoding failed
+        console.error(
+          `[VideoExporter] Encoder error (codec: ${resolvedCodec}, ${this.config.width}x${this.config.height}):`,
+          error,
+        );
+        // Stop export — encoding failed
         this.cancelled = true;
       },
     });
 
-    const codec = this.config.codec || 'avc1.640033';
-
-    const encoderConfig: VideoEncoderConfig = {
-      codec,
+    const baseConfig: Omit<VideoEncoderConfig, 'codec' | 'hardwareAcceleration'> = {
       width: this.config.width,
       height: this.config.height,
       bitrate: this.config.bitrate,
-      framerate: this.config.frameRate,
-      latencyMode: 'quality', // Changed from 'realtime' to 'quality' for better throughput
+      framerate: frameRate,
+      latencyMode: 'quality',
       bitrateMode: 'variable',
-      hardwareAcceleration: 'prefer-hardware',
     };
 
-    // Check hardware support first
-    const hardwareSupport = await VideoEncoder.isConfigSupported(encoderConfig);
-
-    if (hardwareSupport.supported) {
-      // Use hardware encoding
-      console.log('[VideoExporter] Using hardware acceleration');
-      this.encoder.configure(encoderConfig);
-    } else {
-      // Fall back to software encoding
-      console.log('[VideoExporter] Hardware not supported, using software encoding');
-      encoderConfig.hardwareAcceleration = 'prefer-software';
-
-      const softwareSupport = await VideoEncoder.isConfigSupported(encoderConfig);
-      if (!softwareSupport.supported) {
-        throw new Error('Video encoding not supported on this system');
+    for (const candidateCodec of CODEC_FALLBACK_LIST) {
+      const hwConfig: VideoEncoderConfig = {
+        ...baseConfig,
+        codec: candidateCodec,
+        hardwareAcceleration: 'prefer-hardware',
+      };
+      const hwSupport = await VideoEncoder.isConfigSupported(hwConfig);
+      if (hwSupport.supported) {
+        resolvedCodec = candidateCodec;
+        console.log(`[VideoExporter] Using hardware acceleration with codec ${candidateCodec}`);
+        this.encoder.configure(hwConfig);
+        return;
       }
 
-      this.encoder.configure(encoderConfig);
+      const swConfig: VideoEncoderConfig = {
+        ...baseConfig,
+        codec: candidateCodec,
+        hardwareAcceleration: 'prefer-software',
+      };
+      const swSupport = await VideoEncoder.isConfigSupported(swConfig);
+      if (swSupport.supported) {
+        resolvedCodec = candidateCodec;
+        console.log(`[VideoExporter] Using software encoding with codec ${candidateCodec}`);
+        this.encoder.configure(swConfig);
+        return;
+      }
+
+      console.warn(
+        `[VideoExporter] Codec ${candidateCodec} not supported (${this.config.width}x${this.config.height}), trying next...`,
+      );
     }
+
+    throw new Error(
+      `Video encoding not supported on this system. ` +
+        `Tried codecs: ${CODEC_FALLBACK_LIST.join(', ')} at ${this.config.width}x${this.config.height}. ` +
+        `Your browser or hardware may not support H.264 encoding at this resolution. ` +
+        `Try exporting at a lower quality setting.`,
+    );
   }
 
   cancel(): void {
@@ -389,7 +429,7 @@ export class VideoExporter {
     }
 
     this.muxer = null;
-  this.audioProcessor = null;
+    this.audioProcessor = null;
     this.encodeQueue = 0;
     this.pendingMuxing = Promise.resolve();
     this.chunkCount = 0;
@@ -397,4 +437,3 @@ export class VideoExporter {
     this.videoColorSpace = undefined;
   }
 }
-

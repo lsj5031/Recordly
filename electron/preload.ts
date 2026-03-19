@@ -186,9 +186,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Cursor visibility control for cursor-free browser capture fallback
   hideOsCursor: () => ipcRenderer.invoke('hide-cursor'),
 
-  // FFmpeg hardware-accelerated encoding
-  encodeWithFFmpeg: (options: {
-    frames: Uint8Array[];
+  // FFmpeg hardware-accelerated encoding (streaming — one frame at a time)
+  ffmpegStartEncode: (options: {
     width: number;
     height: number;
     frameRate: number;
@@ -196,13 +195,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     useNVENC: boolean;
     useAMF: boolean;
     useQuickSync: boolean;
-    videoUrl?: string;
-    hasAudio?: boolean;
-    trimRegions?: unknown[];
-    speedRegions?: unknown[];
-    audioRegions?: unknown[];
-  }) => ipcRenderer.invoke('encode-with-ffmpeg', options),
+  }) => ipcRenderer.invoke('ffmpeg-start-encode', options),
+
+  ffmpegWriteFrame: (sessionId: string, frameData: Uint8Array) =>
+    ipcRenderer.invoke('ffmpeg-write-frame', sessionId, frameData),
+
+  ffmpegFinishEncode: (sessionId: string) =>
+    ipcRenderer.invoke('ffmpeg-finish-encode', sessionId),
+
+  ffmpegCancelEncode: (sessionId: string) =>
+    ipcRenderer.invoke('ffmpeg-cancel-encode', sessionId),
 
   readEncodedFile: (outputPath: string) => ipcRenderer.invoke('read-encoded-file', outputPath),
 })
-
