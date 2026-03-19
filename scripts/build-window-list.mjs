@@ -3,26 +3,24 @@ import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
 const projectRoot = process.cwd();
-const sourceDir = path.join(projectRoot, "electron", "native", "cursor-monitor");
+const sourceDir = path.join(projectRoot, "electron", "native", "window-list");
 const buildDir = path.join(sourceDir, "build");
 
 if (process.platform !== "win32") {
-	console.log("[build-cursor-monitor] Skipping: host platform is not Windows.");
+	console.log("[build-window-list] Skipping: host platform is not Windows.");
 	process.exit(0);
 }
 
 if (!existsSync(path.join(sourceDir, "CMakeLists.txt"))) {
-	console.error("[build-cursor-monitor] CMakeLists.txt not found at", sourceDir);
+	console.error("[build-window-list] CMakeLists.txt not found at", sourceDir);
 	process.exit(1);
 }
 
 function findCmake() {
-	// Check PATH first
 	try {
 		execSync("cmake --version", { stdio: "pipe" });
 		return "cmake";
 	} catch {
-		// not on PATH
 	}
 
 	const standaloneCmake = path.join("C:", "Program Files", "CMake", "bin", "cmake.exe");
@@ -30,7 +28,6 @@ function findCmake() {
 		return `"${standaloneCmake}"`;
 	}
 
-	// VS 2022 bundled CMake
 	const vsEditions = ["Community", "Professional", "Enterprise", "BuildTools"];
 	for (const edition of vsEditions) {
 		const cmakePath = path.join(
@@ -59,14 +56,14 @@ function findCmake() {
 const cmake = findCmake();
 if (!cmake) {
 	console.error(
-		"[build-cursor-monitor] CMake not found. Install Visual Studio with C++ CMake tools or standalone CMake.",
+		"[build-window-list] CMake not found. Install Visual Studio with C++ CMake tools or standalone CMake.",
 	);
 	process.exit(1);
 }
 
 mkdirSync(buildDir, { recursive: true });
 
-console.log("[build-cursor-monitor] Configuring CMake...");
+console.log("[build-window-list] Configuring CMake...");
 try {
 	execSync(`${cmake} .. -G "Visual Studio 17 2022" -A x64`, {
 		cwd: buildDir,
@@ -74,7 +71,7 @@ try {
 		timeout: 120000,
 	});
 } catch {
-	console.log("[build-cursor-monitor] VS 2022 generator not found, trying VS 2019...");
+	console.log("[build-window-list] VS 2022 generator not found, trying VS 2019...");
 	try {
 		execSync(`${cmake} .. -G "Visual Studio 16 2019" -A x64`, {
 			cwd: buildDir,
@@ -82,12 +79,12 @@ try {
 			timeout: 120000,
 		});
 	} catch (innerError) {
-		console.error("[build-cursor-monitor] CMake configure failed:", innerError.message);
+		console.error("[build-window-list] CMake configure failed:", innerError.message);
 		process.exit(1);
 	}
 }
 
-console.log("[build-cursor-monitor] Building...");
+console.log("[build-window-list] Building...");
 try {
 	execSync(`${cmake} --build . --config Release`, {
 		cwd: buildDir,
@@ -95,14 +92,14 @@ try {
 		timeout: 300000,
 	});
 } catch (error) {
-	console.error("[build-cursor-monitor] Build failed:", error.message);
+	console.error("[build-window-list] Build failed:", error.message);
 	process.exit(1);
 }
 
-const exePath = path.join(buildDir, "Release", "cursor-monitor.exe");
+const exePath = path.join(buildDir, "Release", "window-list.exe");
 if (existsSync(exePath)) {
-	console.log(`[build-cursor-monitor] Built successfully: ${exePath}`);
+	console.log(`[build-window-list] Built successfully: ${exePath}`);
 } else {
-	console.error("[build-cursor-monitor] Expected exe not found at", exePath);
+	console.error("[build-window-list] Expected exe not found at", exePath);
 	process.exit(1);
 }

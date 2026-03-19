@@ -25,6 +25,11 @@ function findCmake() {
     // not on PATH
   }
 
+  const standaloneCmake = path.join('C:', 'Program Files', 'CMake', 'bin', 'cmake.exe');
+  if (existsSync(standaloneCmake)) {
+    return `"${standaloneCmake}"`;
+  }
+
   // VS 2022 bundled CMake
   const vsEditions = ['Community', 'Professional', 'Enterprise', 'BuildTools'];
   for (const edition of vsEditions) {

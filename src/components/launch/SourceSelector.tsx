@@ -30,9 +30,14 @@ function parseSourceMetadata(source: ProcessedDesktopSource) {
 
   const sourceType: 'screen' | 'window' = source.id.startsWith('window:') ? 'window' : 'screen';
   if (sourceType === 'window') {
-    const [appNamePart, ...windowTitleParts] = source.name.split(' — ');
-    const appName = appNamePart?.trim() || undefined;
-    const windowTitle = windowTitleParts.join(' — ').trim() || source.name.trim();
+    const parts = source.name
+      .split(' — ')
+      .map(part => part.trim())
+      .filter(Boolean);
+    const appName = parts.length > 1 ? parts[parts.length - 1] : undefined;
+    const windowTitle = parts.length > 1
+      ? parts.slice(0, -1).join(' — ').trim() || source.name.trim()
+      : source.name.trim();
 
     return {
       sourceType,
@@ -223,7 +228,12 @@ export function SourceSelector() {
                             className={styles.icon + " flex-shrink-0"}
                           />
                         )}
-                        <div className={styles.name + " truncate"}>{source.name}</div>
+                        <div className="min-w-0">
+                          <div className={styles.name + " truncate"}>{source.name}</div>
+                          {source.appName && source.appName !== source.name && (
+                            <div className={styles.cardText + " truncate"}>{source.appName}</div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </Card>
@@ -242,4 +252,3 @@ export function SourceSelector() {
     </div>
   );
 }
-

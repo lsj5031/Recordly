@@ -31,4 +31,7 @@ release/**
 
 # Native capture build artifacts
 electron/native/wgc-capture/build/
+electron/native/wgc-capture/build-codex*/
 electron/native/cursor-monitor/build/
+electron/native/cursor-monitor/build-codex*/
+electron/native/window-list/build/

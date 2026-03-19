@@ -38,6 +38,7 @@
 .cardText {
   color: #a1a1aa;
   font-size: 0.75rem;
+  line-height: 1.2;
 }
 
 /* scrollbar */
@@ -68,4 +69,3 @@
 .sourceGridScroll::-webkit-scrollbar-thumb:active {
   background: rgba(37, 99, 235, 0.8);
 }
-

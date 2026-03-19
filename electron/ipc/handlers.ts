@@ -117,23 +117,6 @@ function normalizeDesktopSourceName(value: string) {
   return value.trim().replace(/\s+/g, ' ').toLowerCase()
 }
 
-function hasUsableSourceThumbnail(
-  thumbnail:
-    | {
-        isEmpty: () => boolean
-        getSize: () => { width: number; height: number }
-      }
-    | null
-    | undefined,
-) {
-  if (!thumbnail || thumbnail.isEmpty()) {
-    return false
-  }
-
-  const size = thumbnail.getSize()
-  return size.width > 1 && size.height > 1
-}
-
 function getMacPrivacySettingsUrl(pane: 'screen' | 'accessibility') {
   return pane === 'screen'
     ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
@@ -337,8 +320,22 @@ type NativeMacWindowSource = {
   height?: number
 }
 
+type NativeWindowsWindowSource = {
+  id: string
+  name: string
+  display_id?: string
+  appName?: string
+  windowTitle?: string
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+}
+
 let cachedNativeMacWindowSources: NativeMacWindowSource[] | null = null
 let cachedNativeMacWindowSourcesAtMs = 0
+let cachedNativeWindowsWindowSources: NativeWindowsWindowSource[] | null = null
+let cachedNativeWindowsWindowSourcesAtMs = 0
 
 async function ensureSwiftHelperBinary(
   sourcePath: string,
@@ -443,6 +440,48 @@ async function getNativeMacWindowSources(options?: { maxAgeMs?: number }) {
 
   cachedNativeMacWindowSources = entries
   cachedNativeMacWindowSourcesAtMs = now
+  return entries
+}
+
+function getNativeWindowsWindowListBinaryPath() {
+  return resolveUnpackedAppPath('electron', 'native', 'window-list', 'build', 'Release', 'window-list.exe')
+}
+
+async function getNativeWindowsWindowSources(options?: { maxAgeMs?: number }) {
+  if (process.platform !== 'win32') {
+    return [] as NativeWindowsWindowSource[]
+  }
+
+  const maxAgeMs = options?.maxAgeMs ?? 5000
+  const now = Date.now()
+  if (cachedNativeWindowsWindowSources && now - cachedNativeWindowsWindowSourcesAtMs < maxAgeMs) {
+    return cachedNativeWindowsWindowSources
+  }
+
+  const binaryPath = getNativeWindowsWindowListBinaryPath()
+  await fs.access(binaryPath, fsConstants.F_OK)
+
+  const { stdout } = await execFileAsync(binaryPath, [], {
+    timeout: 15000,
+    maxBuffer: 10 * 1024 * 1024,
+  })
+
+  const parsed = JSON.parse(stdout)
+  if (!Array.isArray(parsed)) {
+    return [] as NativeWindowsWindowSource[]
+  }
+
+  const entries = parsed.filter((entry: unknown): entry is NativeWindowsWindowSource => {
+    if (!entry || typeof entry !== 'object') {
+      return false
+    }
+
+    const candidate = entry as Partial<NativeWindowsWindowSource>
+    return typeof candidate.id === 'string' && typeof candidate.name === 'string'
+  })
+
+  cachedNativeWindowsWindowSources = entries
+  cachedNativeWindowsWindowSourcesAtMs = now
   return entries
 }
 
@@ -1573,7 +1612,7 @@ export function registerIpcHandlers(
         .map((name) => normalizeDesktopSourceName(name))
         .filter(Boolean)
     )
-      const ownAppName = normalizeDesktopSourceName(app.getName())
+    const ownAppName = normalizeDesktopSourceName(app.getName())
 
     const screenSources = electronSources
       .filter((source) => source.id.startsWith('screen:'))
@@ -1585,10 +1624,95 @@ export function registerIpcHandlers(
         appIcon: source.appIcon ? source.appIcon.toDataURL() : null,
       }))
 
+    if (process.platform === 'win32' && includeWindows) {
+      const electronWindowSourceMap = new Map(
+        electronSources
+          .filter((source) => source.id.startsWith('window:'))
+          .map((source) => [source.id, source] as const)
+      )
+
+      try {
+        const nativeWindowSources = await getNativeWindowsWindowSources()
+        const nativeWindowSourceIds = new Set(nativeWindowSources.map((source) => source.id))
+
+        const mergedWindowSources = nativeWindowSources
+          .filter((source) => {
+            const normalizedWindowName = normalizeDesktopSourceName(source.windowTitle ?? source.name)
+            const normalizedAppName = normalizeDesktopSourceName(source.appName ?? '')
+
+            if (!ALLOW_RECORDLY_WINDOW_CAPTURE && normalizedAppName && normalizedAppName === ownAppName) {
+              return false
+            }
+
+            if (ALLOW_RECORDLY_WINDOW_CAPTURE && (normalizedAppName === 'recordly' || normalizedWindowName.includes('recordly'))) {
+              return true
+            }
+
+            if (!normalizedWindowName) {
+              return true
+            }
+
+            for (const ownName of ownWindowNames) {
+              if (!ownName) continue
+              if (normalizedWindowName === ownName) {
+                return false
+              }
+            }
+
+            return true
+          })
+          .map((source) => {
+            const electronWindowSource = electronWindowSourceMap.get(source.id)
+            return {
+              id: source.id,
+              name: source.name,
+              display_id: electronWindowSource?.display_id ?? source.display_id ?? '',
+              thumbnail: electronWindowSource?.thumbnail ? electronWindowSource.thumbnail.toDataURL() : null,
+              appIcon: electronWindowSource?.appIcon ? electronWindowSource.appIcon.toDataURL() : null,
+              appName: source.appName,
+              windowTitle: source.windowTitle,
+            }
+          })
+
+        const electronOnlyWindowSources = electronSources
+          .filter((source) => source.id.startsWith('window:'))
+          .filter((source) => !nativeWindowSourceIds.has(source.id))
+          .filter((source) => {
+            const normalizedName = normalizeDesktopSourceName(source.name)
+            if (!normalizedName) {
+              return true
+            }
+
+            if (ALLOW_RECORDLY_WINDOW_CAPTURE && normalizedName.includes('recordly')) {
+              return true
+            }
+
+            for (const ownName of ownWindowNames) {
+              if (!ownName) continue
+              if (normalizedName === ownName) {
+                return false
+              }
+            }
+
+            return true
+          })
+          .map((source) => ({
+            id: source.id,
+            name: source.name,
+            display_id: source.display_id,
+            thumbnail: source.thumbnail ? source.thumbnail.toDataURL() : null,
+            appIcon: source.appIcon ? source.appIcon.toDataURL() : null,
+          }))
+
+        return [...screenSources, ...mergedWindowSources, ...electronOnlyWindowSources]
+      } catch (error) {
+        console.warn('Falling back to Electron window enumeration on Windows:', error)
+      }
+    }
+
     if (process.platform !== 'darwin' || !includeWindows) {
       const windowSources = electronSources
         .filter((source) => source.id.startsWith('window:'))
-        .filter((source) => hasUsableSourceThumbnail(source.thumbnail))
         .filter((source) => {
           const normalizedName = normalizeDesktopSourceName(source.name)
           if (!normalizedName) {
@@ -1665,7 +1789,6 @@ export function registerIpcHandlers(
             windowTitle: source.windowTitle,
           }
         })
-        .filter((source) => Boolean(source.thumbnail))
 
       return [...screenSources, ...mergedWindowSources]
     } catch (error) {
@@ -1673,7 +1796,6 @@ export function registerIpcHandlers(
 
       const windowSources = electronSources
         .filter((source) => source.id.startsWith('window:'))
-        .filter((source) => hasUsableSourceThumbnail(source.thumbnail))
         .filter((source) => {
           const normalizedName = normalizeDesktopSourceName(source.name)
           if (!normalizedName) {

@@ -26,8 +26,9 @@
 		"build:native-helpers": "node scripts/build-native-helpers.mjs",
 		"build:wgc-capture": "node scripts/build-wgc-capture.mjs",
 		"build:cursor-monitor": "node scripts/build-cursor-monitor.mjs",
+		"build:window-list": "node scripts/build-window-list.mjs",
 		"build:mac": "npm run build:native-helpers && tsc && vite build && electron-builder --mac",
-		"build:win": "npm run build:wgc-capture && npm run build:cursor-monitor && tsc && vite build && electron-builder --win",
+		"build:win": "npm run build:wgc-capture && npm run build:cursor-monitor && npm run build:window-list && tsc && vite build && electron-builder --win",
 		"build:linux": "tsc && vite build && electron-builder --linux",
 		"i18n:check": "node scripts/i18n-check.mjs",
 		"test": "vitest --run",
@@ -102,4 +103,3 @@
 	},
 	"main": "dist-electron/main.js"
 }
-
